@@ -1,14 +1,14 @@
 """
 Investment News Scanner — Prototype
-Polls RSS feeds, scores stories with Claude, sends Telegram alerts.
+Polls RSS feeds, scores stories with Groq (free), sends Telegram alerts.
 """
 
 import os
 import time
 import hashlib
 import logging
+import json
 import feedparser
-import anthropic
 import requests
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -21,11 +21,14 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Config (set via env vars or edit directly) ──────────────────────────────
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "YOUR_ANTHROPIC_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "YOUR_GROQ_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL", "60"))
 MIN_SCORE_TO_ALERT = int(os.getenv("MIN_SCORE", "50"))  # 50=HIGH, 75=CRITICAL only
+
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama3-8b-8192"  # fast, free, more than capable for scoring
 
 # ── RSS Feeds ────────────────────────────────────────────────────────────────
 RSS_FEEDS = [
@@ -132,7 +135,6 @@ Return this exact JSON structure:
 
 # ── State ────────────────────────────────────────────────────────────────────
 seen_stories: set[str] = set()
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 
 def story_id(entry) -> str:
@@ -172,7 +174,7 @@ def fetch_feed(feed: dict) -> list[dict]:
 
 
 def score_story(story: dict) -> dict | None:
-    """Ask Claude to score a story. Returns scored dict or None on failure."""
+    """Ask Groq to score a story. Returns scored dict or None on failure."""
     prompt = SCORING_PROMPT.format(
         headline=story["title"],
         summary=story["summary"],
@@ -180,14 +182,21 @@ def score_story(story: dict) -> dict | None:
         published=story["published"],
     )
     try:
-        msg = client.messages.create(
-            model="claude-haiku-4-5-20251001",  # fast + cheap for high-volume scoring
-            max_tokens=400,
-            messages=[{"role": "user", "content": prompt}],
+        r = requests.post(
+            GROQ_API_URL,
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": GROQ_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 400,
+                "temperature": 0.1,
+            },
+            timeout=15,
         )
-        raw = msg.content[0].text.strip()
-        import json
-        # strip markdown fences if present
+        raw = r.json()["choices"][0]["message"]["content"].strip()
         raw = raw.replace("```json", "").replace("```", "").strip()
         result = json.loads(raw)
         result.update(story)
