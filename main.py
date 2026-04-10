@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 # ── Config (set via env vars or edit directly) ──────────────────────────────
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "YOUR_GROQ_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
+TELEGRAM_CHAT_IDS = [207117315, 253163267]  # Wayne, Partner
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL", "60"))
 MIN_SCORE_TO_ALERT = int(os.getenv("MIN_SCORE", "50"))  # 50=HIGH, 75=CRITICAL only
 
@@ -243,20 +243,23 @@ def format_telegram_message(s: dict) -> str:
 
 
 def send_telegram(message: str) -> bool:
-    """Send a message via Telegram Bot API."""
+    """Send a message to all recipients via Telegram Bot API."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-    try:
-        r = requests.post(url, json=payload, timeout=10)
-        return r.json().get("ok", False)
-    except Exception as e:
-        log.warning(f"Telegram send error: {e}")
-        return False
+    success = False
+    for chat_id in TELEGRAM_CHAT_IDS:
+        payload = {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        try:
+            r = requests.post(url, json=payload, timeout=10)
+            if r.json().get("ok"):
+                success = True
+        except Exception as e:
+            log.warning(f"Telegram send error to {chat_id}: {e}")
+    return success
 
 
 def run_scan():
