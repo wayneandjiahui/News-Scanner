@@ -332,29 +332,56 @@ def fetch_feed(feed: dict) -> list[dict]:
         return []
 
 
+# track Groq call timestamps for rate limiting
+_groq_call_times: list[float] = []
+
 def score_story(story: dict) -> dict | None:
+    global _groq_call_times
     prompt = SCORING_PROMPT.format(
         headline=story["title"],
         summary=story["summary"],
         source=story["source"],
         published=story["published"],
     )
-    try:
-        r = requests.post(
-            GROQ_URL,
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": GROQ_MODEL, "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 400, "temperature": 0.1},
-            timeout=15,
-        )
-        raw = r.json()["choices"][0]["message"]["content"].strip()
-        raw = raw.replace("```json", "").replace("```", "").strip()
-        result = json.loads(raw)
-        result.update(story)
-        return result
-    except Exception as e:
-        log.warning(f"Scoring error [{story['title'][:60]}]: {e}")
-        return None
+    # rate limit: max 25 calls per 60s window
+    now = time.time()
+    _groq_call_times = [t for t in _groq_call_times if now - t < 60]
+    if len(_groq_call_times) >= 25:
+        wait = 60 - (now - _groq_call_times[0])
+        log.info(f"  Rate limit pause: {wait:.1f}s")
+        time.sleep(max(wait, 1))
+        _groq_call_times = []
+
+    for attempt in range(3):  # retry up to 3 times
+        try:
+            r = requests.post(
+                GROQ_URL,
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={"model": GROQ_MODEL, "messages": [{"role": "user", "content": prompt}],
+                      "max_tokens": 400, "temperature": 0.1},
+                timeout=15,
+            )
+            data = r.json()
+            if "choices" not in data:
+                # rate limited or error from Groq
+                err = data.get("error", {}).get("message", str(data))
+                if "rate" in err.lower() and attempt < 2:
+                    log.info(f"  Groq rate limit hit, waiting 10s... (attempt {attempt+1})")
+                    time.sleep(10)
+                    continue
+                log.warning(f"  Groq error: {err[:80]}")
+                return None
+            _groq_call_times.append(time.time())
+            raw = data["choices"][0]["message"]["content"].strip()
+            raw = raw.replace("```json", "").replace("```", "").strip()
+            result = json.loads(raw)
+            result.update(story)
+            return result
+        except Exception as e:
+            log.warning(f"Scoring error [{story['title'][:60]}]: {e}")
+            if attempt < 2:
+                time.sleep(5)
+    return None
 
 
 def format_message(s: dict, cap_label: str) -> str:
