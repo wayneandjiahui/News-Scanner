@@ -1,6 +1,10 @@
 """
-Investment News Scanner — Prototype
-Polls RSS feeds, scores stories with Groq (free), sends Telegram alerts.
+Investment News Scanner
+- 38 RSS feeds across all major sectors
+- Two-stage filter: keyword pre-filter + Groq AI scoring
+- Duplicate story detection via fuzzy matching
+- Ticker extraction + market cap segmentation via yfinance
+- Telegram alerts to multiple recipients
 """
 
 import os
@@ -10,7 +14,9 @@ import logging
 import json
 import feedparser
 import requests
-from datetime import datetime, timezone
+import yfinance as yf
+from rapidfuzz import fuzz
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 logging.basicConfig(
@@ -20,34 +26,146 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── Config (set via env vars or edit directly) ──────────────────────────────
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "YOUR_GROQ_KEY")
+# ── Config ───────────────────────────────────────────────────────────────────
+GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "YOUR_GROQ_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
-TELEGRAM_CHAT_IDS = [207117315, 253163267]  # Wayne, Partner
-POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL", "60"))
-MIN_SCORE_TO_ALERT = int(os.getenv("MIN_SCORE", "50"))  # 50=HIGH, 75=CRITICAL only
+TELEGRAM_CHAT_IDS  = [207117315, 253163267]  # Wayne, Partner
+POLL_INTERVAL      = int(os.getenv("POLL_INTERVAL", "60"))
+MIN_SCORE          = int(os.getenv("MIN_SCORE", "50"))
+DUPE_THRESHOLD     = 85  # fuzzy similarity % to flag as duplicate
 
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama3-8b-8192"  # fast, free, more than capable for scoring
+GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama3-8b-8192"
 
-# ── RSS Feeds ────────────────────────────────────────────────────────────────
+# ── RSS Feeds (38 total) ──────────────────────────────────────────────────────
 RSS_FEEDS = [
-    # Benzinga (free RSS)
-    {"name": "Benzinga", "url": "https://www.benzinga.com/feed"},
-    {"name": "Benzinga Biotech", "url": "https://www.benzinga.com/topic/biotech/feed"},
-    {"name": "Benzinga M&A", "url": "https://www.benzinga.com/topic/m-a/feed"},
+    # Benzinga
+    {"name": "Benzinga",              "url": "https://www.benzinga.com/feed"},
+    {"name": "Benzinga Biotech",      "url": "https://www.benzinga.com/topic/biotech/feed"},
+    {"name": "Benzinga M&A",          "url": "https://www.benzinga.com/topic/m-a/feed"},
+    {"name": "Benzinga FDA",          "url": "https://www.benzinga.com/topic/fda/feed"},
+    {"name": "Benzinga Earnings",     "url": "https://www.benzinga.com/topic/earnings/feed"},
     # Reuters
-    {"name": "Reuters Business", "url": "https://feeds.reuters.com/reuters/businessNews"},
-    {"name": "Reuters Tech", "url": "https://feeds.reuters.com/reuters/technologyNews"},
-    # Yahoo Finance
-    {"name": "Yahoo Finance", "url": "https://finance.yahoo.com/news/rssindex"},
-    # Seeking Alpha
-    {"name": "Seeking Alpha", "url": "https://seekingalpha.com/market_currents.xml"},
-    # MarketWatch
-    {"name": "MarketWatch", "url": "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines"},
+    {"name": "Reuters Business",      "url": "https://feeds.reuters.com/reuters/businessNews"},
+    {"name": "Reuters Tech",          "url": "https://feeds.reuters.com/reuters/technologyNews"},
+    {"name": "Reuters Health",        "url": "https://feeds.reuters.com/reuters/healthNews"},
+    # Yahoo / Seeking Alpha / MarketWatch
+    {"name": "Yahoo Finance",         "url": "https://finance.yahoo.com/news/rssindex"},
+    {"name": "Seeking Alpha",         "url": "https://seekingalpha.com/market_currents.xml"},
+    {"name": "MarketWatch",           "url": "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines"},
+    # PR Newswire / GlobeNewswire
+    {"name": "PR Newswire",           "url": "https://www.prnewswire.com/rss/news-releases-list.rss"},
+    {"name": "GlobeNewswire Biotech", "url": "https://www.globenewswire.com/RssFeed/subjectcode/15-Biotechnology"},
+    {"name": "GlobeNewswire Finance", "url": "https://www.globenewswire.com/RssFeed/subjectcode/6-Financial%20Services"},
+    # Biotech / Pharma
+    {"name": "BioPharma Dive",        "url": "https://www.biopharmadive.com/feeds/news/"},
+    {"name": "STAT News",             "url": "https://www.statnews.com/feed/"},
+    {"name": "FiercePharma",          "url": "https://www.fiercepharma.com/rss/xml"},
+    {"name": "FierceBiotech",         "url": "https://www.fiercebiotech.com/rss/xml"},
+    # Tech / AI / Semiconductors
+    {"name": "TechCrunch",            "url": "https://techcrunch.com/feed/"},
+    {"name": "VentureBeat",           "url": "https://venturebeat.com/feed/"},
+    {"name": "Ars Technica",          "url": "https://feeds.arstechnica.com/arstechnica/index"},
+    {"name": "The Verge",             "url": "https://www.theverge.com/rss/index.xml"},
+    {"name": "Semiconductor Eng",     "url": "https://semiengineering.com/feed/"},
+    # Energy / Oil / Commodities
+    {"name": "OilPrice.com",          "url": "https://oilprice.com/rss/main"},
+    {"name": "Mining.com",            "url": "https://www.mining.com/feed/"},
+    {"name": "Energy Monitor",        "url": "https://www.energymonitor.ai/feed/"},
+    # Defence / Geopolitical
+    {"name": "Defence News",          "url": "https://www.defensenews.com/arc/outboundfeeds/rss/"},
+    {"name": "Breaking Defence",      "url": "https://breakingdefense.com/feed/"},
+    # Fintech / Payments / Crypto
+    {"name": "Finextra",              "url": "https://www.finextra.com/rss/headlines.aspx"},
+    {"name": "Payments Dive",         "url": "https://www.paymentsdive.com/feeds/news/"},
+    {"name": "The Block",             "url": "https://www.theblock.co/rss.xml"},
+    # Macro / Fed / Rates
+    {"name": "Federal Reserve",       "url": "https://www.federalreserve.gov/feeds/press_all.xml"},
+    {"name": "Econoday",              "url": "https://rss.econoday.com/byweek.rss"},
+    # General Markets
+    {"name": "IBD",                   "url": "https://www.investors.com/feed/"},
+    {"name": "CNBC Markets",          "url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258"},
+    {"name": "Bloomberg Markets",     "url": "https://feeds.bloomberg.com/markets/news.rss"},
+    {"name": "Financial Times",       "url": "https://www.ft.com/rss/home"},
+    {"name": "Barron's",              "url": "https://www.barrons.com/xml/rss/3_7531.xml"},
 ]
 
-# ── Scoring keywords ─────────────────────────────────────────────────────────
+# ── Stage 1 keyword filter ────────────────────────────────────────────────────
+KEYWORDS = [
+    # Biopharma
+    "fda approved","fda approval","nda approved","bla approved","marketing authorization",
+    "phase 3","phase iii","primary endpoint","pivotal trial","clinical trial",
+    "phase 2","phase ii","proof of concept","fast track","breakthrough therapy",
+    "priority review","pdufa","complete response letter","clinical hold",
+    # M&A
+    "to acquire","merger agreement","buyout","takeover","acquisition","definitive agreement",
+    "strategic alternatives","exploring sale","received approach",
+    # Earnings
+    "earnings","beat estimates","missed estimates","raised guidance","lowered guidance",
+    "record revenue","blowout","crushed estimates","eps beat","eps miss",
+    # Tech / AI / Chips
+    "launched","unveiled","world's first","first ever","breakthrough",
+    "large language model","llm","artificial intelligence","ai model",
+    "chip shortage","export controls","chips act","supply shortage",
+    "data centre","data center","hyperscaler","gpu","semiconductor",
+    # Energy
+    "opec","production cut","supply disruption","oil discovery","reserve upgrade",
+    "pipeline attack","force majeure","lng contract",
+    # Defence / Geopolitical / War
+    "dod contract","pentagon deal","nato","defence contract","defense contract",
+    "weapons package","sanctions","embargo","invasion","escalation","ceasefire",
+    "war talks","peace talks","peace deal","settlement talks","failed negotiations",
+    "nuclear deal","nuclear talks","nuclear threat","military strike","airstrike",
+    "missile strike","troops deployed","war declared","conflict escalation",
+    "regime change","coup","terror attack","geopolitical risk","geopolitical tension",
+    # Iran / Middle East specific
+    "iran","tehran","israel","gaza","hezbollah","hamas","houthi",
+    "strait of hormuz","red sea","middle east","persian gulf",
+    "nuclear program","uranium enrichment","iaea","jcpoa",
+    "trump iran","vance iran","iran deal","iran sanctions","iran talks",
+    "oil embargo","oil sanctions","iran nuclear",
+    # Russia / Ukraine / China / Taiwan
+    "russia","ukraine","putin","zelensky","kremlin",
+    "taiwan","beijing","xi jinping","south china sea",
+    "north korea","kim jong","missile test","icbm",
+    # Broader geopolitical
+    "trade war","trade dispute","diplomatic crisis","expelled ambassador",
+    "military escalation","no-fly zone","blockade","siege",
+    "war premium","risk off","flight to safety","safe haven",
+    "gold surges","oil surges","market panic","black swan",
+    # Macro
+    "rate cut","rate hike","federal reserve","fomc","quantitative easing",
+    "interest rate","inflation","cpi","pce","jobs report","yield curve",
+    "powell","ecb","boj","pboc","bank of england","rba","snb",
+    "recession","stagflation","soft landing","hard landing",
+    "treasury yield","10-year yield","bond selloff","credit spreads",
+    "dollar index","dxy","currency crisis","debt ceiling",
+    "gdp","unemployment","nonfarm payroll","consumer confidence",
+    # Tax / Policy
+    "corporate tax","capital gains","tax reform","tariff","windfall tax",
+    "import duty","export ban","trade sanctions","trade restriction",
+    "global minimum tax","oecd","pillar two","repatriation",
+    # Interest rates / monetary policy
+    "rate decision","basis points","bps cut","bps hike",
+    "dot plot","terminal rate","forward guidance","pivot",
+    "quantitative tightening","balance sheet","repo rate",
+    "emergency meeting","inter-meeting","unscheduled meeting",
+    # Fintech / Crypto
+    "banking licence","stablecoin","crypto approved","etf approved",
+    "money laundering","fraud","cease and desist",
+    "cbdc","digital dollar","sec crypto","bitcoin etf","spot etf",
+    # Short squeeze
+    "short squeeze","short interest","days to cover","most shorted",
+    "gamma squeeze","options expiry","max pain",
+    # Negative catalysts
+    "sec investigation","class action","restatement",
+    "data breach","cyberattack","ransomware","antitrust","doj investigation",
+    "dilution","public offering","share issuance","at-the-money","atm offering",
+    "going concern","bankruptcy","chapter 11","default","debt restructuring",
+    "profit warning","guidance cut","missed revenue","earnings miss",
+]
+
+# ── Groq scoring prompt ───────────────────────────────────────────────────────
 SCORING_PROMPT = """You are a financial news scoring engine for a day trader focused on high-impact catalysts.
 
 Analyse this news headline and summary. Return ONLY a valid JSON object, no markdown, no explanation.
@@ -58,22 +176,34 @@ SUMMARY: {summary}
 SOURCE: {source}
 PUBLISHED: {published}
 
-Score this news item using these rules:
+Score this news item:
 
 CATALYST TYPE (0-40 points):
 - FDA approved / NDA approved / BLA approved / marketing authorization = 40
 - Phase 3 primary endpoint met / pivotal trial success = 38
 - Merger agreement / buyout / acquisition announced = 38
-- Major tech product launch / world's first / revolutionary = 38
+- Major tech product launch / world first / revolutionary = 38
 - Chip export controls / CHIPS Act / supply shortage = 38
 - OPEC surprise cut / geopolitical supply disruption = 38
 - Emergency rate cut / surprise rate hike = 38
 - QE announced / QT pause / currency intervention = 38
 - Major defence contract / Pentagon deal = 38
+- War escalation / military strike / invasion = 38
+- Nuclear threat / nuclear deal collapse / JCPOA breakdown = 38
+- Iran sanctions / oil embargo / Strait of Hormuz threat = 38
+- Failed peace talks / war settlement collapsed / negotiations breakdown = 35
+- US-China trade war escalation / Taiwan conflict = 35
+- Russia-Ukraine major escalation = 35
+- Terror attack on major infrastructure = 35
+- Coup / regime change in oil-producing nation = 33
 - Blowout earnings / record revenue / crushed estimates / raised guidance = 30
 - Bond yield spike / yield curve inversion = 30
 - Corporate tax cut / capital gains tax change = 30
+- Recession signal / GDP contraction / stagflation = 30
+- Profit warning / guidance cut / earnings miss = 28
 - Short squeeze setup / high short interest = 28
+- Bankruptcy / chapter 11 / debt default / going concern = 28
+- Diplomatic crisis / ambassador expelled = 25
 - Phase 2 success / positive clinical data = 22
 - AI breakthrough / LLM announcement / benchmark = 20
 - Data centre mega deal / hyperscaler contract = 20
@@ -84,7 +214,7 @@ CATALYST TYPE (0-40 points):
 - Data breach / cyberattack / ransomware = -15
 - Antitrust / DOJ investigation / EU fine = -20
 - Fraud / SEC investigation / class action = -25
-- Ceasefire / peace deal (bearish for defence) = -15
+- Ceasefire announced / peace deal signed (bearish defence, bullish markets) = 20
 
 COMPANY PROFILE (0-35 points):
 - Clinical-stage biopharma / single catalyst company = 35
@@ -100,70 +230,99 @@ NEWS URGENCY (0-25 points):
 - General news wire = 10
 - Rumoured / reportedly / unconfirmed = -10
 
-SECTOR CASCADE — does this news reprice an entire sector? (true/false)
-- Rate cut/hike, QE/QT, tax policy, OPEC, major war escalation = true
+SECTOR CASCADE: true if rate cut/hike, QE/QT, tax policy, OPEC, major war escalation. Else false.
+DIRECTION: bullish, bearish, or neutral
+TICKER: extract ticker if mentioned or implied. Null if none.
 
-DIRECTION:
-- bullish, bearish, or neutral
+SCORE BANDS: 75-100=CRITICAL, 50-74=HIGH, 30-49=MEDIUM, 10-29=LOW, <10=DISCARD
 
-TICKER EXTRACTION:
-- Extract stock ticker symbol if mentioned or strongly implied. If none, return null.
-- For well-known companies not mentioned by ticker, infer it (e.g. "Apple" = "AAPL")
-
-SCORE BANDS:
-- 75-100 = CRITICAL
-- 50-74 = HIGH  
-- 30-49 = MEDIUM
-- 10-29 = LOW
-- <10 = DISCARD
-
-Return this exact JSON structure:
+Return ONLY this JSON:
 {{
-  "catalyst_score": <int 0-40>,
-  "profile_score": <int 0-35>,
-  "urgency_score": <int 0-25>,
+  "catalyst_score": <int>,
+  "profile_score": <int>,
+  "urgency_score": <int>,
   "total_score": <int>,
-  "band": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "DISCARD",
-  "direction": "bullish" | "bearish" | "neutral",
+  "band": "CRITICAL|HIGH|MEDIUM|LOW|DISCARD",
+  "direction": "bullish|bearish|neutral",
   "sector_cascade": <bool>,
   "ticker": "<string or null>",
-  "catalyst_type": "<short label e.g. FDA Approval, Earnings Beat, M&A>",
-  "affected_sectors": ["<sector1>", "<sector2>"],
-  "one_line_reason": "<why this scored this way in max 15 words>"
+  "catalyst_type": "<short label>",
+  "affected_sectors": ["<sector>"],
+  "one_line_reason": "<max 15 words>"
 }}"""
 
-
-# ── State ────────────────────────────────────────────────────────────────────
-seen_stories: set[str] = set()
+# ── State ─────────────────────────────────────────────────────────────────────
+seen_ids: set[str] = set()
+recent_headlines: list[str] = []
 
 
 def story_id(entry) -> str:
-    """Stable unique ID for a feed entry."""
-    key = (entry.get("link") or entry.get("id") or entry.get("title", ""))
+    key = entry.get("link") or entry.get("id") or entry.get("title", "")
     return hashlib.md5(key.encode()).hexdigest()
 
 
 def is_prepost_market() -> bool:
-    """True if current ET time is pre-market (4–9:30) or after-hours (16–20)."""
     now = datetime.now(ZoneInfo("America/New_York"))
     h = now.hour + now.minute / 60
     return (4 <= h < 9.5) or (16 <= h < 20)
 
 
+def passes_keyword_filter(title: str, summary: str) -> bool:
+    text = (title + " " + summary).lower()
+    return any(kw in text for kw in KEYWORDS)
+
+
+def is_duplicate(headline: str) -> bool:
+    for seen in recent_headlines[-200:]:
+        if fuzz.token_sort_ratio(headline.lower(), seen.lower()) >= DUPE_THRESHOLD:
+            return True
+    return False
+
+
+def get_market_cap_label(ticker: str) -> str:
+    if not ticker:
+        return ""
+    try:
+        cap = yf.Ticker(ticker).info.get("marketCap", 0)
+        if not cap:
+            return ""
+        if cap < 300_000_000:
+            return "🔬 Micro cap"
+        elif cap < 2_000_000_000:
+            return "🐣 Small cap"
+        elif cap < 10_000_000_000:
+            return "🏢 Mid cap"
+        elif cap < 200_000_000_000:
+            return "🏦 Large cap"
+        else:
+            return "🐋 Mega cap"
+    except Exception:
+        return ""
+
+
 def fetch_feed(feed: dict) -> list[dict]:
-    """Parse one RSS feed, return list of story dicts."""
     try:
         parsed = feedparser.parse(feed["url"])
         stories = []
-        for entry in parsed.entries[:15]:  # latest 15 per feed
-            sid = story_id(entry)
-            if sid in seen_stories:
+        for entry in parsed.entries[:15]:
+            sid     = story_id(entry)
+            title   = entry.get("title", "")
+            summary = entry.get("summary", entry.get("description", ""))[:500]
+
+            if sid in seen_ids:
                 continue
+            if not passes_keyword_filter(title, summary):
+                continue
+            if is_duplicate(title):
+                log.info(f"  [DUPE BLOCKED] {title[:70]}")
+                seen_ids.add(sid)
+                continue
+
             stories.append({
                 "id": sid,
                 "source": feed["name"],
-                "title": entry.get("title", ""),
-                "summary": entry.get("summary", entry.get("description", ""))[:500],
+                "title": title,
+                "summary": summary,
                 "link": entry.get("link", ""),
                 "published": entry.get("published", "now"),
             })
@@ -174,7 +333,6 @@ def fetch_feed(feed: dict) -> list[dict]:
 
 
 def score_story(story: dict) -> dict | None:
-    """Ask Groq to score a story. Returns scored dict or None on failure."""
     prompt = SCORING_PROMPT.format(
         headline=story["title"],
         summary=story["summary"],
@@ -183,17 +341,10 @@ def score_story(story: dict) -> dict | None:
     )
     try:
         r = requests.post(
-            GROQ_API_URL,
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": GROQ_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 400,
-                "temperature": 0.1,
-            },
+            GROQ_URL,
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            json={"model": GROQ_MODEL, "messages": [{"role": "user", "content": prompt}],
+                  "max_tokens": 400, "temperature": 0.1},
             timeout=15,
         )
         raw = r.json()["choices"][0]["message"]["content"].strip()
@@ -202,139 +353,132 @@ def score_story(story: dict) -> dict | None:
         result.update(story)
         return result
     except Exception as e:
-        log.warning(f"Scoring error for [{story['title'][:60]}]: {e}")
+        log.warning(f"Scoring error [{story['title'][:60]}]: {e}")
         return None
 
 
-def format_telegram_message(s: dict) -> str:
-    """Format a scored story into a Telegram message."""
-    band = s.get("band", "")
+def format_message(s: dict, cap_label: str) -> str:
+    band      = s.get("band", "")
     direction = s.get("direction", "neutral")
-    ticker = s.get("ticker")
-    cascade = s.get("sector_cascade", False)
+    ticker    = s.get("ticker")
+    cascade   = s.get("sector_cascade", False)
 
-    # emoji indicators
-    band_icon = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡"}.get(band, "⚪")
-    dir_icon = {"bullish": "📈", "bearish": "📉", "neutral": "➡️"}.get(direction, "➡️")
+    band_icon    = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡"}.get(band, "⚪")
+    dir_icon     = {"bullish": "📈", "bearish": "📉", "neutral": "➡️"}.get(direction, "➡️")
+    ticker_line  = f"\n🏷 <b>Ticker:</b> <code>{ticker}</code>" if ticker else ""
+    cap_line     = f"  <b>{cap_label}</b>" if cap_label else ""
+    sectors      = ", ".join(s.get("affected_sectors", []))
+    sector_line  = f"\n📂 <b>Sectors:</b> {sectors}" if sectors else ""
     cascade_line = "\n⚡ <b>SECTOR CASCADE</b> — reprices entire sector" if cascade else ""
-    ticker_line = f"\n🏷 <b>Ticker:</b> <code>{ticker}</code>" if ticker else ""
-    prepost = "\n🌙 <b>Pre/Post market</b>" if is_prepost_market() else ""
+    prepost      = "\n🌙 <b>Pre/Post market</b>" if is_prepost_market() else ""
 
-    sectors = ", ".join(s.get("affected_sectors", []))
-    sector_line = f"\n📂 <b>Sectors:</b> {sectors}" if sectors else ""
-
-    msg = (
+    return (
         f"{band_icon} <b>{band} ALERT</b> {dir_icon}{prepost}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>{s['title']}</b>\n\n"
         f"📌 <b>Catalyst:</b> {s.get('catalyst_type', 'N/A')}\n"
         f"💡 <b>Why:</b> {s.get('one_line_reason', '')}"
-        f"{ticker_line}"
+        f"{ticker_line}{cap_line}"
         f"{sector_line}"
         f"{cascade_line}\n\n"
         f"📊 Score: <b>{s.get('total_score', 0)}/100</b> "
-        f"(Cat:{s.get('catalyst_score',0)} + "
-        f"Profile:{s.get('profile_score',0)} + "
-        f"Urgency:{s.get('urgency_score',0)})\n"
+        f"(Cat:{s.get('catalyst_score', 0)} + "
+        f"Profile:{s.get('profile_score', 0)} + "
+        f"Urgency:{s.get('urgency_score', 0)})\n"
         f"🔗 <a href=\"{s.get('link', '')}\">Read full story</a>\n"
         f"📡 Source: {s.get('source', '')}"
     )
-    return msg
 
 
 def send_telegram(message: str) -> bool:
-    """Send a message to all recipients via Telegram Bot API."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url     = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     success = False
     for chat_id in TELEGRAM_CHAT_IDS:
-        payload = {
-            "chat_id": chat_id,
-            "text": message,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        }
         try:
-            r = requests.post(url, json=payload, timeout=10)
+            r = requests.post(url, json={
+                "chat_id": chat_id, "text": message,
+                "parse_mode": "HTML", "disable_web_page_preview": True,
+            }, timeout=10)
             if r.json().get("ok"):
                 success = True
         except Exception as e:
-            log.warning(f"Telegram send error to {chat_id}: {e}")
+            log.warning(f"Telegram error to {chat_id}: {e}")
     return success
 
 
 def run_scan():
-    """One full scan cycle across all feeds."""
     log.info("── Scan cycle starting ──")
     new_stories = []
 
     for feed in RSS_FEEDS:
         stories = fetch_feed(feed)
         if stories:
-            log.info(f"  {feed['name']}: {len(stories)} new stories")
+            log.info(f"  {feed['name']}: {len(stories)} passed filter")
         new_stories.extend(stories)
 
     if not new_stories:
-        log.info("  No new stories this cycle.")
+        log.info("  Nothing new passed filter this cycle.")
         return
 
-    log.info(f"  Scoring {len(new_stories)} stories...")
+    log.info(f"  Scoring {len(new_stories)} stories with Groq...")
     alerted = 0
 
     for story in new_stories:
-        seen_stories.add(story["id"])  # mark seen before scoring to avoid dupes
+        seen_ids.add(story["id"])
+        recent_headlines.append(story["title"])
+
         scored = score_story(story)
         if not scored:
             continue
 
-        band = scored.get("band", "DISCARD")
-        total = scored.get("total_score", 0)
+        band   = scored.get("band", "DISCARD")
+        total  = scored.get("total_score", 0)
+        ticker = scored.get("ticker")
 
         log.info(
             f"  [{band:8s}] {total:3d}/100  {story['title'][:70]}"
-            + (f"  [{scored.get('ticker')}]" if scored.get("ticker") else "")
+            + (f"  [{ticker}]" if ticker else "")
         )
 
-        if total >= MIN_SCORE_TO_ALERT and band not in ("LOW", "DISCARD"):
-            msg = format_telegram_message(scored)
-            ok = send_telegram(msg)
+        if total >= MIN_SCORE and band not in ("LOW", "DISCARD"):
+            cap_label = get_market_cap_label(ticker) if ticker else ""
+            msg = format_message(scored, cap_label)
+            ok  = send_telegram(msg)
             if ok:
                 alerted += 1
-                log.info(f"    ✅ Telegram sent")
+                log.info(f"    ✅ Sent — {ticker or 'no ticker'} {cap_label}")
             else:
-                log.warning(f"    ❌ Telegram failed")
+                log.warning("    ❌ Telegram failed")
 
-        time.sleep(0.5)  # gentle rate limiting between Claude calls
-
-    log.info(f"── Scan complete. {alerted} alerts sent. ──\n")
+    log.info(f"── Done. {alerted} alerts sent. ──\n")
 
 
 def main():
     log.info("=" * 50)
     log.info("Investment News Scanner — starting up")
-    log.info(f"Poll interval : {POLL_INTERVAL_SECONDS}s")
-    log.info(f"Alert threshold: score >= {MIN_SCORE_TO_ALERT}")
     log.info(f"Feeds          : {len(RSS_FEEDS)}")
+    log.info(f"Poll interval  : {POLL_INTERVAL}s")
+    log.info(f"Alert threshold: {MIN_SCORE}/100")
+    log.info(f"Dupe threshold : {DUPE_THRESHOLD}% similarity")
     log.info("=" * 50)
 
-    # startup test
     ok = send_telegram(
-        "🚀 <b>Investment News Scanner online</b>\n"
-        f"Monitoring {len(RSS_FEEDS)} feeds · Alert threshold: {MIN_SCORE_TO_ALERT}/100"
+        f"🚀 <b>Investment News Scanner online</b>\n"
+        f"📡 {len(RSS_FEEDS)} feeds · "
+        f"⚡ {POLL_INTERVAL}s interval · "
+        f"🎯 Threshold: {MIN_SCORE}/100"
     )
-    if ok:
-        log.info("Telegram test message sent ✅")
-    else:
-        log.warning("Telegram test failed — check your token and chat ID")
+    log.info("Telegram ✅" if ok else "Telegram ❌ — check token/chat ID")
 
     while True:
         try:
             run_scan()
         except KeyboardInterrupt:
-            log.info("Stopped by user.")
+            log.info("Stopped.")
             break
         except Exception as e:
             log.error(f"Scan error: {e}")
-        time.sleep(POLL_INTERVAL_SECONDS)
+        time.sleep(POLL_INTERVAL)
 
 
 if __name__ == "__main__":
