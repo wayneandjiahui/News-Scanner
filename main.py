@@ -284,7 +284,38 @@ Return ONLY this JSON:
 # ── State ─────────────────────────────────────────────────────────────────────
 seen_ids: set[str] = set()
 recent_headlines: list[str] = []
-alerted_headlines: list[str] = []  # headlines already sent as alerts — cross-cycle dedup
+alerted_headlines: list[str] = []      # for cross-cycle fuzzy dedup
+alerted_topics: dict[str, float] = {}  # topic -> timestamp, blocks same topic for 2hrs
+
+TOPIC_BLOCK_SECONDS = 7200  # 2 hours — same topic won't alert twice
+
+# Core topic keywords — if two stories share a topic key, they're the same story
+TOPIC_KEYS = [
+    # Geopolitical
+    "iran","israel","russia","ukraine","china taiwan","north korea","houthi",
+    "strait of hormuz","red sea","middle east","gaza","hezbollah",
+    # Macro
+    "powell","fomc","fed rate","rate cut","rate hike","federal reserve decision",
+    "ecb rate","boj rate","inflation cpi","jobs report","nonfarm",
+    # Specific company events — use ticker if available
+    # (handled separately via ticker dedup below)
+]
+
+def get_topic_key(title: str, ticker: str | None) -> str | None:
+    """Extract a dedup topic key from a headline."""
+    t = title.lower()
+    # if we have a ticker, use ticker + catalyst type as key
+    if ticker:
+        for catalyst in ["fda","merger","acquisition","earnings","bankruptcy",
+                         "phase 3","phase 2","short squeeze","offering","sec investigation"]:
+            if catalyst in t:
+                return f"{ticker.upper()}:{catalyst}"
+        return f"{ticker.upper()}:general"
+    # otherwise match on topic keywords
+    for key in TOPIC_KEYS:
+        if key in t:
+            return key
+    return None
 
 
 def story_id(entry) -> str:
@@ -541,12 +572,37 @@ def run_scan():
             + (f"  [{ticker}]" if ticker else "")
         )
 
-        if total >= MIN_SCORE and band not in ("LOW", "DISCARD"):
-            # cross-cycle dedup: don't re-alert same story from different source
+        # hard gates — must pass all before alerting
+        if total < 60:
+            log.info(f"  [BELOW-60] {total}/100 — skipped")
+            continue
+        if band in ("LOW", "DISCARD"):
+            log.info(f"  [BAND-SKIP] {band} — skipped")
+            continue
+        if not ticker:
+            log.info(f"  [NO-TICKER] Skipping — no tradeable company identified")
+            continue
+
+        if True:  # gates passed
+            # 1. fuzzy headline dedup — catch near-identical wording
             if any(fuzz.token_sort_ratio(story["title"].lower(), h.lower()) >= DUPE_THRESHOLD
                    for h in alerted_headlines[-300:]):
-                log.info(f"    [ALERT-DUPE] Already alerted on this story, skipping")
+                log.info(f"    [FUZZY-DUPE] Skipping near-identical headline")
                 continue
+
+            # 2. topic dedup — block same topic for 2 hours
+            topic_key = get_topic_key(story["title"], ticker)
+            if topic_key:
+                now = time.time()
+                expired = [k for k, t in alerted_topics.items() if now - t > TOPIC_BLOCK_SECONDS]
+                for k in expired:
+                    del alerted_topics[k]
+                if topic_key in alerted_topics:
+                    age_mins = int((now - alerted_topics[topic_key]) / 60)
+                    log.info(f"    [TOPIC-DUPE] '{topic_key}' already alerted {age_mins}min ago, skipping")
+                    continue
+                alerted_topics[topic_key] = now
+
             alerted_headlines.append(story["title"])
             cap_label = get_market_cap_label(ticker) if ticker else ""
             msg = format_message(scored, cap_label)
