@@ -35,7 +35,14 @@ MIN_SCORE          = int(os.getenv("MIN_SCORE", "60"))
 DUPE_THRESHOLD     = 70  # fuzzy similarity % to flag as duplicate
 
 GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.1-8b-instant"  # higher rate limits on free tier
+# Fallback list — if a model is decommissioned, auto-switches to next
+GROQ_MODELS = [
+    "llama-3.1-8b-instant",       # fast, high rate limits
+    "llama-3.2-3b-preview",       # lightweight fallback
+    "llama-3.3-70b-versatile",    # slower but smarter fallback
+    "mixtral-8x7b-32768",         # last resort
+]
+GROQ_MODEL = GROQ_MODELS[0]  # start with first
 
 # ── RSS Feeds (38 total) ──────────────────────────────────────────────────────
 RSS_FEEDS = [
@@ -417,6 +424,7 @@ def score_story(story: dict) -> dict | None:
         time.sleep(max(wait, 1))
         _groq_call_times = []
 
+    global GROQ_MODEL
     for attempt in range(3):  # retry up to 3 times
         try:
             r = requests.post(
@@ -428,8 +436,20 @@ def score_story(story: dict) -> dict | None:
             )
             data = r.json()
             if "choices" not in data:
-                # rate limited or error from Groq
                 err = data.get("error", {}).get("message", str(data))
+                # auto-switch if model decommissioned
+                if "decommissioned" in err.lower() or "does not exist" in err.lower():
+                    current_idx = GROQ_MODELS.index(GROQ_MODEL) if GROQ_MODEL in GROQ_MODELS else 0
+                    next_idx = current_idx + 1
+                    if next_idx < len(GROQ_MODELS):
+                        old = GROQ_MODEL
+                        GROQ_MODEL = GROQ_MODELS[next_idx]
+                        log.warning(f"  Model '{old}' decommissioned — switching to '{GROQ_MODEL}'")
+                        attempt -= 1  # retry with new model
+                        continue
+                    else:
+                        log.error("  All Groq models exhausted — update GROQ_MODELS list")
+                        return None
                 if "rate" in err.lower() and attempt < 2:
                     log.info(f"  Groq rate limit hit, waiting 10s... (attempt {attempt+1})")
                     time.sleep(10)
