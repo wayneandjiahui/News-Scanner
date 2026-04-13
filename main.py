@@ -35,7 +35,7 @@ MIN_SCORE          = int(os.getenv("MIN_SCORE", "60"))
 DUPE_THRESHOLD     = 70  # fuzzy similarity % to flag as duplicate
 
 GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "llama-3.1-8b-instant"  # higher rate limits on free tier
 
 # ── RSS Feeds (38 total) ──────────────────────────────────────────────────────
 RSS_FEEDS = [
@@ -167,95 +167,32 @@ KEYWORDS = [
 
 # ── Noise blacklist — stories containing ANY of these are discarded immediately ──
 NOISE_BLACKLIST = [
-    # ── Analyst opinions / ratings / price targets ──
-    # These are opinions, not events. Only actual decisions move markets.
-    "price target","raises price target","lowers price target","raises pt","lowers pt",
-    "upgraded to buy","upgraded to hold","upgraded to sell","downgraded to buy",
-    "downgraded to hold","downgraded to sell","downgraded to neutral",
+    # Analyst ratings / price targets — opinions not events
     "initiated coverage","initiates coverage","starts coverage",
-    "reiterates buy","reiterates hold","reiterates sell","reiterates neutral",
-    "maintains buy","maintains hold","maintains sell","maintains neutral",
+    "reiterates buy","reiterates hold","reiterates sell",
+    "maintains buy","maintains hold","maintains sell",
     "maintains overweight","maintains underweight","maintains outperform",
-    "analyst note","analyst rating","analyst opinion","analyst view",
-    "analyst sees","analyst expects","analyst thinks","analyst believes",
-    "wall street consensus","street expects","street sees",
-    "price objective","fair value estimate","intrinsic value",
     "buy rating","sell rating","hold rating","neutral rating",
-    "strong buy","strong sell","market perform","sector perform",
-    "top pick","best idea","high conviction","favorite stock",
-
-    # ── Opinion pieces / commentary ──
-    "opinion:","commentary:","perspective:","viewpoint:",
-    "here's why","here is why","this is why","that's why",
-    "reasons to buy","reasons to sell","reasons to own","reasons to avoid",
-    "should you buy","should you sell","should you own","should investors",
-    "is it worth buying","is it a buy","is it a sell","time to buy","time to sell",
-    "case for buying","case for selling","bull case","bear case",
-    "why i bought","why i sold","why we like","why we own",
-    "what investors should","what you should know","what to know",
-    "everything you need","all you need to know","complete guide",
-
-    # ── Stock recommendation listicles ──
-    "top stocks","best stocks","top 5 stocks","top 10 stocks",
-    "stocks to buy","stocks to sell","stocks to watch","stocks to avoid",
-    "best shares","top picks","best investments","best etfs",
-    "undervalued stocks","overvalued stocks","cheap stocks","growth stocks to buy",
-    "dividend stocks","passive income stocks","income stocks",
-    "retirement portfolio","long term portfolio","portfolio addition",
-    "monthly dividend","weekly dividend","dividend aristocrat",
-    "value play","value pick","bargain stock","hidden gem",
-
-    # ── Crypto price predictions / forecasts ──
-    "price prediction","price forecast","price target 2025","price target 2026",
-    "price target 2030","2025 prediction","2026 prediction","2030 prediction",
-    "will reach","could hit","might reach","expected to reach",
-    "crypto forecast","bitcoin forecast","ethereum forecast",
+    # Opinion / listicle content
+    "should you buy","should you sell","is it a buy","is it a sell",
+    "reasons to buy","reasons to sell",
+    "top 5 stocks","top 10 stocks","best stocks to buy",
+    "dividend stocks to buy","passive income stocks",
+    # Crypto price predictions only
+    "price prediction","2025 prediction","2026 prediction","2030 prediction",
     "altcoin prediction","token prediction","coin prediction",
-    "technical analysis says","ta says","chart says","chart suggests",
-
-    # ── Generic Fed / central bank commentary (not actual decisions) ──
-    "fed considering","fed exploring","fed studying","fed looking at",
-    "fed officials say","fed official says","fed member says","fed speaker",
-    "fed watcher","fed observer","fed monitor",
-    "sources say fed","sources say rate","sources suggest rate",
-    "fed may","fed might","fed could","fed expected to",
-    "cross border payments","payment rails","faster payments","real time payments",
-    "cbdc exploration","cbdc study","cbdc research","digital dollar study",
-    "treasury warns","treasury reminds","treasury notes","treasury says banks",
-    "occ reminds","fdic reminds","bank regulator warns",
-    "routine examination","supervisory letter","guidance letter",
-    "compliance reminder","regulatory reminder","annual stress test",
-
-    # ── Earnings previews / previews (not actual results) ──
-    "earnings preview","earnings week ahead","earnings calendar",
-    "what to expect from","what analysts expect","consensus estimate",
-    "ahead of earnings","before earnings report","earnings watch",
-    "preview:","earnings season preview","q1 preview","q2 preview",
-    "q3 preview","q4 preview","quarterly preview",
-    "estimate revision","estimate cut","estimate raise",
-
-    # ── Generic war / conflict noise (not market-moving events) ──
-    "war update","conflict update","daily update","situation report",
+    # Earnings previews only — actual results still pass
+    "earnings preview","earnings calendar","ahead of earnings","before earnings report",
+    # Generic Fed commentary — not actual decisions
+    "fed considering","fed exploring","fed officials say","fed member says",
+    "cross border payments","payment rails","faster payments",
+    "treasury warns banks","treasury reminds","occ reminds","fdic reminds",
+    # Generic war situation updates — not market-moving escalations
     "troops advance","forces advance","village captured","town captured",
-    "shelling reported","shelling continues","artillery fire","drone spotted",
-    "frontline report","battlefield update","military briefing",
-    "casualties reported","wounded reported","civilian casualties",
-
-    # ── General market noise / roundups ──
-    "weekly roundup","monthly roundup","weekly wrap","market wrap",
-    "week in review","month in review","year in review",
-    "top stories this week","biggest stories","notable stories",
-    "markets this week","stocks this week","crypto this week",
-    "morning note","afternoon note","evening note","daily note",
-    "premarket movers","after hours movers","midday movers",
-    "most active stocks","most traded stocks","volume leaders",
-    "52 week high","52 week low","new 52-week",
-
-    # ── Useless minor bank / regulatory actions ──
-    "bank fined for","bank penalized for","minor violation",
-    "consent order","cease and desist letter","no-action letter",
-    "corrective action","remediation plan","minor infraction",
-    "routine audit","scheduled review","periodic review",
+    "shelling continues","frontline report","battlefield update",
+    # General roundups / noise
+    "weekly roundup","monthly roundup","week in review","month in review",
+    "top stories this week","morning note","evening note","daily note",
 ]
 
 # ── Groq scoring prompt ───────────────────────────────────────────────────────
