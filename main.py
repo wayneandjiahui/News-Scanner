@@ -104,6 +104,11 @@ KEYWORDS = [
     "phase 3","phase iii","primary endpoint","pivotal trial","clinical trial",
     "phase 2","phase ii","proof of concept","fast track","breakthrough therapy",
     "priority review","pdufa","complete response letter","clinical hold",
+    # Pharma pre-announcements (WATCH alerts)
+    "to announce","to present data","to host conference call","to report data",
+    "interim analysis","futility analysis","data readout","trial results expected",
+    "pdufa date","fda decision expected","fda review","advisory committee",
+    "adcom","data to be released","topline data","interim results",
     # M&A
     "to acquire","merger agreement","buyout","takeover","acquisition","definitive agreement",
     "strategic alternatives","exploring sale","received approach",
@@ -200,6 +205,15 @@ NOISE_BLACKLIST = [
     # General roundups / noise
     "weekly roundup","monthly roundup","week in review","month in review",
     "top stories this week","morning note","evening note","daily note",
+    # Opinion / analysis framing — not actual events
+    "is a riskier","is far riskier","is a risky bet","riskier bet",
+    "analysis:","opinion:","commentary:","perspective:","explainer:",
+    "why this matters","what this means","here is what","here's what",
+    "could signal","might signal","may signal","what to make of",
+    "a closer look","deep dive","breaking down","unpacking",
+    "is it really","are we heading","is this the end","what happens if",
+    "the real reason","the truth about","everything to know",
+    "playbook","far riskier","poses more complicated",
 ]
 
 # ── Groq scoring prompt ───────────────────────────────────────────────────────
@@ -370,6 +384,73 @@ def get_market_cap_label(ticker: str) -> str:
             return "🐋 Mega cap"
     except Exception:
         return ""
+
+
+# ── Pharma WATCH alert detection ─────────────────────────────────────────────
+# Keywords that signal a scheduled pharma event within ~1 day
+WATCH_KEYWORDS = [
+    "tomorrow","today","monday","tuesday","wednesday","thursday","friday",
+    "this morning","this afternoon","this evening","tonight",
+    "april","may","june","july","august","september","october","november","december",
+    "pdufa","adcom","advisory committee","fda decision","fda review",
+    "interim analysis","futility analysis","topline data","data readout",
+    "phase 2","phase 3","phase ii","phase iii","pivotal trial",
+    "conference call","webcast","investor call",
+]
+
+WATCH_PHARMA_KEYWORDS = [
+    "therapeutics","biosciences","biopharma","oncology","pharmaceutical",
+    "biotech","biologics","medicines","drug","trial","clinical",
+    "fda","nda","bla","inda","pdufa","adcom",
+]
+
+TIME_INDICATORS_1DAY = [
+    "today","tomorrow","tonight","this morning","this afternoon",
+    "monday","tuesday","wednesday","thursday","friday","saturday","sunday",
+    "at 8:","at 9:","at 10:","at 11:","at 12:","at 1:","at 2:","at 3:",
+    "a.m. et","p.m. et","am et","pm et","eastern time",
+]
+
+alerted_watch: set[str] = set()  # prevent duplicate WATCH alerts
+
+def is_pharma_watch_story(title: str, summary: str) -> bool:
+    """Detect if this is a pharma pre-announcement with event within ~1 day."""
+    text = (title + " " + summary).lower()
+    # must be pharma related
+    if not any(kw in text for kw in WATCH_PHARMA_KEYWORDS):
+        return False
+    # must have a time indicator suggesting event is imminent (today/tomorrow)
+    if not any(kw in text for kw in TIME_INDICATORS_1DAY):
+        return False
+    # must mention a catalyst type
+    catalyst_signals = [
+        "data","results","readout","analysis","decision","approval",
+        "conference call","webcast","present","announce","report"
+    ]
+    if not any(kw in text for kw in catalyst_signals):
+        return False
+    return True
+
+
+def format_watch_message(story: dict, ticker: str | None, cap_label: str) -> str:
+    """Format a WATCH alert for upcoming pharma catalyst."""
+    tv_line = ""
+    if ticker:
+        tv_url = f"https://www.tradingview.com/symbols/{ticker}/"
+        tv_line = (
+            f"\n🏷 <b>Ticker:</b> <code>{ticker}</code>"
+            + (f"  <b>{cap_label}</b>" if cap_label else "")
+            + f'  <a href="{tv_url}">📊 TradingView</a>'
+        )
+    return (
+        f"👀 <b>WATCH ALERT — Pharma Catalyst Incoming</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>{story['title']}</b>\n\n"
+        f"⏰ <b>Event imminent</b> — within 24 hours"
+        f"{tv_line}\n\n"
+        f"🔗 <a href=\"{story.get('link', '')}\">[Read full story →</a>\n"
+        f"📡 Source: {story.get('source', '')}"
+    )
 
 
 def fetch_feed(feed: dict) -> list[dict]:
@@ -558,6 +639,34 @@ def send_telegram(message: str, image_url: str | None = None) -> bool:
     return success
 
 
+def check_watch_alerts(new_stories: list[dict]):
+    """Check for pharma pre-announcements with event within ~1 day."""
+    import re
+    watch_sent = 0
+    for story in new_stories:
+        title   = story.get("title", "")
+        summary = story.get("summary", "")
+        if not is_pharma_watch_story(title, summary):
+            continue
+        watch_key = hashlib.md5(title.encode()).hexdigest()[:12]
+        if watch_key in alerted_watch:
+            continue
+        alerted_watch.add(watch_key)
+        ticker = None
+        m = re.search(r'\((?:NASDAQ|NYSE|AMEX):\s*([A-Z]{1,5})\)', title + " " + summary)
+        if m:
+            ticker = m.group(1)
+        cap_label = get_market_cap_label(ticker) if ticker else ""
+        msg = format_watch_message(story, ticker, cap_label)
+        image_url = get_og_image(story.get("link", ""))
+        ok = send_telegram(msg, image_url)
+        if ok:
+            watch_sent += 1
+            log.info(f"  👀 WATCH sent — {ticker or 'no ticker'} — {title[:60]}")
+    if watch_sent:
+        log.info(f"  {watch_sent} WATCH alerts sent.")
+
+
 def run_scan():
     log.info("── Scan cycle starting ──")
     new_stories = []
@@ -571,6 +680,9 @@ def run_scan():
     if not new_stories:
         log.info("  Nothing new passed filter this cycle.")
         return
+
+    # run WATCH check before scoring — no Groq needed
+    check_watch_alerts(new_stories)
 
     log.info(f"  Scoring {len(new_stories)} stories with Groq...")
     alerted = 0
