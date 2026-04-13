@@ -369,7 +369,7 @@ def fetch_feed(feed: dict) -> list[dict]:
     try:
         parsed = feedparser.parse(feed["url"])
         stories = []
-        for entry in parsed.entries[:15]:
+        for entry in parsed.entries[:5]:  # max 5 per feed to avoid rate limit burst
             sid     = story_id(entry)
             title   = entry.get("title", "")
             summary = entry.get("summary", entry.get("description", ""))[:500]
@@ -579,8 +579,9 @@ def run_scan():
         if band in ("LOW", "DISCARD"):
             log.info(f"  [BAND-SKIP] {band} — skipped")
             continue
-        if not ticker:
-            log.info(f"  [NO-TICKER] Skipping — no tradeable company identified")
+        # ticker required for MEDIUM — HIGH/CRITICAL can be sector-wide signals
+        if not ticker and band == "MEDIUM":
+            log.info(f"  [NO-TICKER] MEDIUM with no ticker — skipped")
             continue
 
         if True:  # gates passed
