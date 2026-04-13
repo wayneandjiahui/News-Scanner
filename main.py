@@ -165,6 +165,99 @@ KEYWORDS = [
     "profit warning","guidance cut","missed revenue","earnings miss",
 ]
 
+# ── Noise blacklist — stories containing ANY of these are discarded immediately ──
+NOISE_BLACKLIST = [
+    # ── Analyst opinions / ratings / price targets ──
+    # These are opinions, not events. Only actual decisions move markets.
+    "price target","raises price target","lowers price target","raises pt","lowers pt",
+    "upgraded to buy","upgraded to hold","upgraded to sell","downgraded to buy",
+    "downgraded to hold","downgraded to sell","downgraded to neutral",
+    "initiated coverage","initiates coverage","starts coverage",
+    "reiterates buy","reiterates hold","reiterates sell","reiterates neutral",
+    "maintains buy","maintains hold","maintains sell","maintains neutral",
+    "maintains overweight","maintains underweight","maintains outperform",
+    "analyst note","analyst rating","analyst opinion","analyst view",
+    "analyst sees","analyst expects","analyst thinks","analyst believes",
+    "wall street consensus","street expects","street sees",
+    "price objective","fair value estimate","intrinsic value",
+    "buy rating","sell rating","hold rating","neutral rating",
+    "strong buy","strong sell","market perform","sector perform",
+    "top pick","best idea","high conviction","favorite stock",
+
+    # ── Opinion pieces / commentary ──
+    "opinion:","commentary:","perspective:","viewpoint:",
+    "here's why","here is why","this is why","that's why",
+    "reasons to buy","reasons to sell","reasons to own","reasons to avoid",
+    "should you buy","should you sell","should you own","should investors",
+    "is it worth buying","is it a buy","is it a sell","time to buy","time to sell",
+    "case for buying","case for selling","bull case","bear case",
+    "why i bought","why i sold","why we like","why we own",
+    "what investors should","what you should know","what to know",
+    "everything you need","all you need to know","complete guide",
+
+    # ── Stock recommendation listicles ──
+    "top stocks","best stocks","top 5 stocks","top 10 stocks",
+    "stocks to buy","stocks to sell","stocks to watch","stocks to avoid",
+    "best shares","top picks","best investments","best etfs",
+    "undervalued stocks","overvalued stocks","cheap stocks","growth stocks to buy",
+    "dividend stocks","passive income stocks","income stocks",
+    "retirement portfolio","long term portfolio","portfolio addition",
+    "monthly dividend","weekly dividend","dividend aristocrat",
+    "value play","value pick","bargain stock","hidden gem",
+
+    # ── Crypto price predictions / forecasts ──
+    "price prediction","price forecast","price target 2025","price target 2026",
+    "price target 2030","2025 prediction","2026 prediction","2030 prediction",
+    "will reach","could hit","might reach","expected to reach",
+    "crypto forecast","bitcoin forecast","ethereum forecast",
+    "altcoin prediction","token prediction","coin prediction",
+    "technical analysis says","ta says","chart says","chart suggests",
+
+    # ── Generic Fed / central bank commentary (not actual decisions) ──
+    "fed considering","fed exploring","fed studying","fed looking at",
+    "fed officials say","fed official says","fed member says","fed speaker",
+    "fed watcher","fed observer","fed monitor",
+    "sources say fed","sources say rate","sources suggest rate",
+    "fed may","fed might","fed could","fed expected to",
+    "cross border payments","payment rails","faster payments","real time payments",
+    "cbdc exploration","cbdc study","cbdc research","digital dollar study",
+    "treasury warns","treasury reminds","treasury notes","treasury says banks",
+    "occ reminds","fdic reminds","bank regulator warns",
+    "routine examination","supervisory letter","guidance letter",
+    "compliance reminder","regulatory reminder","annual stress test",
+
+    # ── Earnings previews / previews (not actual results) ──
+    "earnings preview","earnings week ahead","earnings calendar",
+    "what to expect from","what analysts expect","consensus estimate",
+    "ahead of earnings","before earnings report","earnings watch",
+    "preview:","earnings season preview","q1 preview","q2 preview",
+    "q3 preview","q4 preview","quarterly preview",
+    "estimate revision","estimate cut","estimate raise",
+
+    # ── Generic war / conflict noise (not market-moving events) ──
+    "war update","conflict update","daily update","situation report",
+    "troops advance","forces advance","village captured","town captured",
+    "shelling reported","shelling continues","artillery fire","drone spotted",
+    "frontline report","battlefield update","military briefing",
+    "casualties reported","wounded reported","civilian casualties",
+
+    # ── General market noise / roundups ──
+    "weekly roundup","monthly roundup","weekly wrap","market wrap",
+    "week in review","month in review","year in review",
+    "top stories this week","biggest stories","notable stories",
+    "markets this week","stocks this week","crypto this week",
+    "morning note","afternoon note","evening note","daily note",
+    "premarket movers","after hours movers","midday movers",
+    "most active stocks","most traded stocks","volume leaders",
+    "52 week high","52 week low","new 52-week",
+
+    # ── Useless minor bank / regulatory actions ──
+    "bank fined for","bank penalized for","minor violation",
+    "consent order","cease and desist letter","no-action letter",
+    "corrective action","remediation plan","minor infraction",
+    "routine audit","scheduled review","periodic review",
+]
+
 # ── Groq scoring prompt ───────────────────────────────────────────────────────
 SCORING_PROMPT = """You are a financial news scoring engine for a day trader focused on high-impact catalysts.
 
@@ -270,6 +363,9 @@ def is_prepost_market() -> bool:
 
 def passes_keyword_filter(title: str, summary: str) -> bool:
     text = (title + " " + summary).lower()
+    # reject if any blacklisted phrase found
+    if any(noise in text for noise in NOISE_BLACKLIST):
+        return False
     return any(kw in text for kw in KEYWORDS)
 
 
@@ -412,27 +508,61 @@ def format_message(s: dict, cap_label: str) -> str:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>{s['title']}</b>\n\n"
         f"📌 <b>Catalyst:</b> {s.get('catalyst_type', 'N/A')}\n"
-        f"💡 <b>Why:</b> {s.get('one_line_reason', '')}"
+
         f"{ticker_line}"
         f"{cascade_line}\n\n"
         f"📊 Score: <b>{s.get('total_score', 0)}/100</b> "
         f"(Cat:{s.get('catalyst_score', 0)} + "
         f"Profile:{s.get('profile_score', 0)} + "
         f"Urgency:{s.get('urgency_score', 0)})\n"
-        f"🔗 <a href=\"{s.get('link', '')}\">[Read full story</a>\n"
+        f"🔗 <a href=\"{s.get('link', '')}\">[Read full story →</a>\n"
         f"📡 Source: {s.get('source', '')}"
     )
 
 
-def send_telegram(message: str) -> bool:
-    url     = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+def get_og_image(url: str) -> str | None:
+    """Try to extract Open Graph image from article URL for preview."""
+    try:
+        r = requests.get(url, timeout=5, headers={"User-Agent": "Mozilla/5.0"})
+        from html.parser import HTMLParser
+        class OGParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.image = None
+            def handle_starttag(self, tag, attrs):
+                if tag == "meta":
+                    d = dict(attrs)
+                    if d.get("property") == "og:image" and d.get("content"):
+                        self.image = d["content"]
+        p = OGParser()
+        p.feed(r.text[:10000])
+        return p.image
+    except Exception:
+        return None
+
+
+def send_telegram(message: str, image_url: str | None = None) -> bool:
     success = False
     for chat_id in TELEGRAM_CHAT_IDS:
         try:
-            r = requests.post(url, json={
-                "chat_id": chat_id, "text": message,
-                "parse_mode": "HTML", "disable_web_page_preview": True,
-            }, timeout=10)
+            if image_url:
+                # send as photo with caption
+                r = requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+                    json={"chat_id": chat_id, "photo": image_url,
+                          "caption": message, "parse_mode": "HTML"},
+                    timeout=10,
+                )
+                if r.json().get("ok"):
+                    success = True
+                    continue
+            # fallback to text if no image or photo send failed
+            r = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id, "text": message,
+                      "parse_mode": "HTML", "disable_web_page_preview": False},
+                timeout=10,
+            )
             if r.json().get("ok"):
                 success = True
         except Exception as e:
@@ -483,7 +613,8 @@ def run_scan():
             alerted_headlines.append(story["title"])
             cap_label = get_market_cap_label(ticker) if ticker else ""
             msg = format_message(scored, cap_label)
-            ok  = send_telegram(msg)
+            image_url = get_og_image(story.get("link", ""))
+            ok  = send_telegram(msg, image_url)
             if ok:
                 alerted += 1
                 log.info(f"    ✅ Sent — {ticker or 'no ticker'} {cap_label}")
