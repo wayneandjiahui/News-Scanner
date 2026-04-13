@@ -35,7 +35,7 @@ MIN_SCORE          = int(os.getenv("MIN_SCORE", "50"))
 DUPE_THRESHOLD     = 85  # fuzzy similarity % to flag as duplicate
 
 GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama3-8b-8192"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # ── RSS Feeds (38 total) ──────────────────────────────────────────────────────
 RSS_FEEDS = [
