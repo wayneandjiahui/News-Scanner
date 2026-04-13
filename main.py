@@ -31,8 +31,8 @@ GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "YOUR_GROQ_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
 TELEGRAM_CHAT_IDS  = [207117315, 253163267]  # Wayne, Partner
 POLL_INTERVAL      = int(os.getenv("POLL_INTERVAL", "60"))
-MIN_SCORE          = int(os.getenv("MIN_SCORE", "50"))
-DUPE_THRESHOLD     = 85  # fuzzy similarity % to flag as duplicate
+MIN_SCORE          = int(os.getenv("MIN_SCORE", "60"))
+DUPE_THRESHOLD     = 70  # fuzzy similarity % to flag as duplicate
 
 GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
@@ -254,6 +254,7 @@ Return ONLY this JSON:
 # ── State ─────────────────────────────────────────────────────────────────────
 seen_ids: set[str] = set()
 recent_headlines: list[str] = []
+alerted_headlines: list[str] = []  # headlines already sent as alerts — cross-cycle dedup
 
 
 def story_id(entry) -> str:
@@ -392,12 +393,19 @@ def format_message(s: dict, cap_label: str) -> str:
 
     band_icon    = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡"}.get(band, "⚪")
     dir_icon     = {"bullish": "📈", "bearish": "📉", "neutral": "➡️"}.get(direction, "➡️")
-    ticker_line  = f"\n🏷 <b>Ticker:</b> <code>{ticker}</code>" if ticker else ""
-    cap_line     = f"  <b>{cap_label}</b>" if cap_label else ""
-    sectors      = ", ".join(s.get("affected_sectors", []))
-    sector_line  = f"\n📂 <b>Sectors:</b> {sectors}" if sectors else ""
     cascade_line = "\n⚡ <b>SECTOR CASCADE</b> — reprices entire sector" if cascade else ""
     prepost      = "\n🌙 <b>Pre/Post market</b>" if is_prepost_market() else ""
+
+    # Ticker + market cap + TradingView link
+    if ticker:
+        tv_url = f"https://www.tradingview.com/symbols/{ticker}/"
+        ticker_line = (
+            f"\n🏷 <b>Ticker:</b> <code>{ticker}</code>"
+            + (f"  <b>{cap_label}</b>" if cap_label else "")
+            + f"  <a href=\"{tv_url}\">📊 TradingView</a>"
+        )
+    else:
+        ticker_line = ""
 
     return (
         f"{band_icon} <b>{band} ALERT</b> {dir_icon}{prepost}\n"
@@ -405,14 +413,13 @@ def format_message(s: dict, cap_label: str) -> str:
         f"<b>{s['title']}</b>\n\n"
         f"📌 <b>Catalyst:</b> {s.get('catalyst_type', 'N/A')}\n"
         f"💡 <b>Why:</b> {s.get('one_line_reason', '')}"
-        f"{ticker_line}{cap_line}"
-        f"{sector_line}"
+        f"{ticker_line}"
         f"{cascade_line}\n\n"
         f"📊 Score: <b>{s.get('total_score', 0)}/100</b> "
         f"(Cat:{s.get('catalyst_score', 0)} + "
         f"Profile:{s.get('profile_score', 0)} + "
         f"Urgency:{s.get('urgency_score', 0)})\n"
-        f"🔗 <a href=\"{s.get('link', '')}\">Read full story</a>\n"
+        f"🔗 <a href=\"{s.get('link', '')}\">[Read full story</a>\n"
         f"📡 Source: {s.get('source', '')}"
     )
 
@@ -468,6 +475,12 @@ def run_scan():
         )
 
         if total >= MIN_SCORE and band not in ("LOW", "DISCARD"):
+            # cross-cycle dedup: don't re-alert same story from different source
+            if any(fuzz.token_sort_ratio(story["title"].lower(), h.lower()) >= DUPE_THRESHOLD
+                   for h in alerted_headlines[-300:]):
+                log.info(f"    [ALERT-DUPE] Already alerted on this story, skipping")
+                continue
+            alerted_headlines.append(story["title"])
             cap_label = get_market_cap_label(ticker) if ticker else ""
             msg = format_message(scored, cap_label)
             ok  = send_telegram(msg)
